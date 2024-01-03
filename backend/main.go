@@ -87,6 +87,40 @@ type AudioResponse struct {
 	Text     string          `json:"text"`
 }
 
+func NewAudioResponse() *AudioResponse {
+	return &AudioResponse{}
+}
+
+func (v *AudioResponse) AppendSegment(resp openai.AudioResponse, starttime float64) {
+	v.Task = resp.Task
+	v.Language = resp.Language
+	v.Duration += resp.Duration
+	v.Text += " " + resp.Text
+
+	for _, s := range resp.Segments {
+		v.Segments = append(v.Segments, &AudioSegment{
+			// ASR Segment.
+			ID:               s.ID,
+			Seek:             s.Seek,
+			Start:            starttime + s.Start,
+			End:              starttime + s.End,
+			Text:             s.Text,
+			Tokens:           s.Tokens,
+			Temperature:      s.Temperature,
+			AvgLogprob:       s.AvgLogprob,
+			CompressionRatio: s.CompressionRatio,
+			NoSpeechProb:     s.NoSpeechProb,
+			Transient:        s.Transient,
+			// UUID.
+			UUID: uuid.NewString(),
+			// Whether user remove it.
+			Removed: false,
+			// The update time.
+			Update: AITime(time.Now()),
+		})
+	}
+}
+
 func (v *AudioResponse) QuerySegment(uuid string) *AudioSegment {
 	for i, s := range v.Segments {
 		if s.UUID == uuid {
@@ -137,13 +171,15 @@ func (v *AudioResponse) Save(filename string) error {
 
 type Project struct {
 	// Project UUID
-	sid string
+	SID string `json:"sid"`
 	// The logging context, to write all logs in one context for a sage.
 	loggingCtx context.Context
+	// The input video file URL.
+	InputURL string `json:"inputURL"`
 	// Last update of stage.
 	update time.Time
 	// The main directory.
-	mainDir string
+	MainDir string `json:"mainDir"`
 	// The ASR input audio file.
 	asrInputAudio string
 	// The ASR output json object.
@@ -155,7 +191,7 @@ type Project struct {
 func NewProject(opts ...func(*Project)) *Project {
 	v := &Project{
 		// Create new UUID.
-		sid: uuid.NewString(),
+		SID: uuid.NewString(),
 		// Update time.
 		update: time.Now(),
 	}
@@ -173,8 +209,44 @@ func (v *Project) Close() error {
 	if _, err := os.Stat(v.asrOutputJSON); err == nil {
 		os.Remove(v.asrOutputJSON)
 	}
-	if _, err := os.Stat(v.mainDir); err == nil {
-		os.Remove(v.mainDir)
+	if _, err := os.Stat(v.MainDir); err == nil {
+		os.Remove(v.MainDir)
+	}
+	return nil
+}
+
+func (v *Project) buildProjectFile() string {
+	return path.Join(v.MainDir, "project.json")
+}
+
+func (v *Project) Load() error {
+	if v.MainDir == "" {
+		return errors.Errorf("empty main dir")
+	}
+	filename := v.buildProjectFile()
+
+	if b, err := ioutil.ReadFile(filename); err != nil {
+		return errors.Wrapf(err, "read json file %v", filename)
+	} else if err = json.Unmarshal(b, v); err != nil {
+		return errors.Wrapf(err, "unmarshal json file %v", filename)
+	}
+	return nil
+}
+
+func (v *Project) Save() error {
+	if v.MainDir == "" {
+		return errors.Errorf("empty main dir")
+	}
+	filename := v.buildProjectFile()
+
+	if err := os.MkdirAll(v.MainDir, os.ModeDir|os.FileMode(0755)); err != nil {
+		return errors.Wrapf(err, "mkdir %v", v.MainDir)
+	}
+
+	if b, err := json.Marshal(v); err != nil {
+		return errors.Wrapf(err, "marshal")
+	} else if err = os.WriteFile(filename, b, os.FileMode(0644)); err != nil {
+		return errors.Wrapf(err, "write json file %v", filename)
 	}
 	return nil
 }
@@ -213,7 +285,7 @@ func (v *TranslatorServer) RemoveStage(stage *Project) {
 	defer v.lock.Unlock()
 
 	for i, s := range v.stages {
-		if s.sid == stage.sid {
+		if s.SID == stage.SID {
 			v.stages = append(v.stages[:i], v.stages[i+1:]...)
 			return
 		}
@@ -225,7 +297,7 @@ func (v *TranslatorServer) QueryStage(sid string) *Project {
 	defer v.lock.Unlock()
 
 	for _, s := range v.stages {
-		if s.sid == sid {
+		if s.SID == sid {
 			return s
 		}
 	}
@@ -262,11 +334,24 @@ func doCreateStage(ctx context.Context, sid string) *Project {
 	ctx = logger.WithContext(ctx)
 	project := NewProject(func(project *Project) {
 		project.loggingCtx = ctx
-		project.sid = sid
+		project.SID = sid
+		project.MainDir = path.Join(workDir, fmt.Sprintf("project-%v", sid))
 	})
 
+	// If stage exists, load it.
+	filename := project.buildProjectFile()
+	if _, err := os.Stat(filename); err == nil {
+		if err := project.Load(); err != nil {
+			return nil
+		}
+	} else {
+		if err := project.Save(); err != nil {
+			return nil
+		}
+	}
+
 	translatorServer.AddStage(project)
-	logger.Tf(ctx, "Create project sid=%v", project.sid)
+	logger.Tf(ctx, "Create project sid=%v", project.SID)
 
 	go func() {
 		defer project.Close()
@@ -277,7 +362,7 @@ func doCreateStage(ctx context.Context, sid string) *Project {
 			case <-time.After(3 * time.Second):
 				if project.Expired() {
 					logger.Tf(ctx, "Project: Remove %v for expired, update=%v",
-						project.sid, project.update.Format(time.RFC3339))
+						project.SID, project.update.Format(time.RFC3339))
 					translatorServer.RemoveStage(project)
 					return
 				}
@@ -294,7 +379,35 @@ func handleStageCreate(ctx context.Context, w http.ResponseWriter, r *http.Reque
 	ohttp.WriteData(ctx, w, r, &struct {
 		SID string `json:"sid"`
 	}{
-		SID: project.sid,
+		SID: project.SID,
+	})
+	return nil
+}
+
+func handleStageLoad(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+	var sid string
+	if err := ParseBody(ctx, r.Body, &struct {
+		SID *string `json:"sid"`
+	}{
+		SID: &sid,
+	}); err != nil {
+		return errors.Wrapf(err, "parse body")
+	}
+
+	project := translatorServer.QueryStage(sid)
+	if project == nil {
+		project = doCreateStage(ctx, sid)
+	}
+
+	ctx = project.loggingCtx
+
+	ohttp.WriteData(ctx, w, r, &struct {
+		// The UUID of stage.
+		SID string `json:"sid"`
+		// The input video file URL.
+		InputURL string `json:"url"`
+	}{
+		SID: project.SID, InputURL: project.InputURL,
 	})
 	return nil
 }
@@ -310,22 +423,23 @@ func handleStageAsr(ctx context.Context, w http.ResponseWriter, r *http.Request)
 		return errors.Wrapf(err, "parse body")
 	}
 
-	stage := translatorServer.QueryStage(sid)
-	if stage == nil {
-		stage = doCreateStage(ctx, sid)
+	project := translatorServer.QueryStage(sid)
+	if project == nil {
+		project = doCreateStage(ctx, sid)
 	}
 
-	ctx = stage.loggingCtx
-	stage.mainDir = path.Join(workDir, fmt.Sprintf("project-%v", stage.sid))
-	if err := os.MkdirAll(stage.mainDir, os.ModeDir|os.FileMode(0755)); err != nil {
-		return errors.Wrapf(err, "mkdir %v", stage.mainDir)
-	}
-	stage.asrInputAudio = path.Join(stage.mainDir, "input.m4a")
+	ctx = project.loggingCtx
+	project.asrInputAudio = path.Join(project.MainDir, "input.m4a")
 	logger.Tf(ctx, "Handle project sid=%v, main=%v, url=%v, output=%v",
-		stage.sid, stage.mainDir, inputURL, stage.asrInputAudio)
+		project.SID, project.MainDir, inputURL, project.asrInputAudio)
 
 	// Convert input to audio only file.
-	if _, err := os.Stat(stage.asrInputAudio); err != nil {
+	if _, err := os.Stat(project.asrInputAudio); err != nil {
+		project.InputURL = inputURL
+		if err := project.Save(); err != nil {
+			return errors.Wrapf(err, "save project")
+		}
+
 		inputFile := inputURL
 		if strings.HasPrefix(inputFile, "/api/vod-translator/resources/") {
 			inputFile = path.Join("static", inputFile[len("/api/vod-translator/resources/"):])
@@ -335,29 +449,28 @@ func handleStageAsr(ctx context.Context, w http.ResponseWriter, r *http.Request)
 		}
 
 		if true {
-			err := exec.CommandContext(ctx, "ffmpeg",
+			if err := exec.CommandContext(ctx, "ffmpeg",
 				"-i", inputFile,
 				"-vn", "-c:a", "aac", "-ac", "1", "-ar", "16000", "-ab", "50k",
-				stage.asrInputAudio,
-			).Run()
-
-			if err != nil {
+				project.asrInputAudio,
+			).Run(); err != nil {
 				return errors.Errorf("Error converting the file")
 			}
-			logger.Tf(ctx, "Convert to ogg %v ok", stage.asrInputAudio)
+			logger.Tf(ctx, "Convert to ogg %v ok", project.asrInputAudio)
 		}
 	}
 
 	// Load ASR from JSON file.
-	stage.asrOutputJSON = path.Join(stage.mainDir, "input.json")
-	if _, err := os.Stat(stage.asrOutputJSON); err == nil {
-		stage.asrOutputObject = &AudioResponse{}
-		if err := stage.asrOutputObject.Load(stage.asrOutputJSON); err != nil {
-			return errors.Wrapf(err, "load json file %v", stage.asrOutputJSON)
+	project.asrOutputJSON = path.Join(project.MainDir, "input.json")
+	if _, err := os.Stat(project.asrOutputJSON); err == nil {
+		project.asrOutputObject = &AudioResponse{}
+		if err := project.asrOutputObject.Load(project.asrOutputJSON); err != nil {
+			return errors.Wrapf(err, "load json file %v", project.asrOutputJSON)
 		}
 
 		// Reinitialize the segments.
-		for _, s := range stage.asrOutputObject.Segments {
+		for index, s := range project.asrOutputObject.Segments {
+			s.ID = 10000 + index
 			if s.UUID == "" {
 				s.UUID = uuid.NewString()
 			}
@@ -365,63 +478,70 @@ func handleStageAsr(ctx context.Context, w http.ResponseWriter, r *http.Request)
 				s.Update = AITime(time.Now())
 			}
 		}
-		logger.Tf(ctx, "Load ASR object from %v ok", stage.asrOutputJSON)
+		logger.Tf(ctx, "Load ASR object from %v ok", project.asrOutputJSON)
 	} else {
-		// Do ASR, convert to text.
-		client := openai.NewClientWithConfig(aiConfig)
-		resp, err := client.CreateTranscription(
-			ctx,
-			openai.AudioRequest{
-				Model:    openai.Whisper1,
-				FilePath: stage.asrInputAudio,
-				Format:   openai.AudioResponseFormatVerboseJSON,
-				Language: os.Getenv("VODT_ASR_LANGUAGE"),
-			},
-		)
+		// Load the duration of input file.
+		duration, bitrate, err := detectInput(ctx, project)
 		if err != nil {
-			return errors.Wrapf(err, "transcription")
+			return errors.Wrapf(err, "detect input")
 		}
-		logger.Tf(ctx, "ASR ok, stage=%v, resp is <%v>B", stage.sid, len(resp.Text))
 
-		stage.asrOutputObject = &AudioResponse{
-			Task:     resp.Task,
-			Language: resp.Language,
-			Duration: resp.Duration,
-			Text:     resp.Text,
+		// Reset the ASR output object.
+		project.asrOutputObject = NewAudioResponse()
+
+		// Split the audio to segments, because each ASR is limited to 25MB by OpenAI,
+		// see https://platform.openai.com/docs/guides/speech-to-text
+		limitDuration := int(25*1024*1024*8/float64(bitrate)) / 10
+		for starttime := float64(0); starttime < duration; starttime += float64(limitDuration) {
+			if err := func() error {
+				tmpAsrInputAudio := path.Join(project.MainDir, fmt.Sprintf("input-%v.m4a", starttime))
+				defer os.Remove(tmpAsrInputAudio)
+
+				if err := exec.CommandContext(ctx, "ffmpeg",
+					"-i", project.asrInputAudio,
+					"-ss", fmt.Sprintf("%v", starttime), "-t", fmt.Sprintf("%v", limitDuration),
+					"-c", "copy", "-y", tmpAsrInputAudio,
+				).Run(); err != nil {
+					return errors.Errorf("Error converting the file %v", tmpAsrInputAudio)
+				}
+				logger.Tf(ctx, "Convert to segment %v ok, starttime=%v", tmpAsrInputAudio, starttime)
+
+				// Do ASR, convert to text.
+				client := openai.NewClientWithConfig(aiConfig)
+				resp, err := client.CreateTranscription(
+					ctx,
+					openai.AudioRequest{
+						Model:    openai.Whisper1,
+						FilePath: tmpAsrInputAudio,
+						Format:   openai.AudioResponseFormatVerboseJSON,
+						Language: os.Getenv("VODT_ASR_LANGUAGE"),
+					},
+				)
+				if err != nil {
+					return errors.Wrapf(err, "transcription")
+				}
+				logger.Tf(ctx, "ASR ok, project=%v, resp is <%v>B, segments=%v",
+					project.SID, len(resp.Text), len(project.asrOutputObject.Segments))
+
+				// Append the segment to ASR output object.
+				project.asrOutputObject.AppendSegment(resp, starttime)
+				if err := project.asrOutputObject.Save(project.asrOutputJSON); err != nil {
+					return errors.Wrapf(err, "save")
+				}
+				logger.Tf(ctx, "Save ASR output to %v ok", project.asrOutputJSON)
+
+				return nil
+			}(); err != nil {
+				return errors.Wrapf(err, "split starttime=%v, duration=%v", starttime, limitDuration)
+			}
 		}
-		for _, s := range resp.Segments {
-			stage.asrOutputObject.Segments = append(stage.asrOutputObject.Segments, &AudioSegment{
-				// ASR Segment.
-				ID:               s.ID,
-				Seek:             s.Seek,
-				Start:            s.Start,
-				End:              s.End,
-				Text:             s.Text,
-				Tokens:           s.Tokens,
-				Temperature:      s.Temperature,
-				AvgLogprob:       s.AvgLogprob,
-				CompressionRatio: s.CompressionRatio,
-				NoSpeechProb:     s.NoSpeechProb,
-				Transient:        s.Transient,
-				// UUID.
-				UUID: uuid.NewString(),
-				// Whether user remove it.
-				Removed: false,
-				// The update time.
-				Update: AITime(time.Now()),
-			})
-		}
-		if err := stage.asrOutputObject.Save(stage.asrOutputJSON); err != nil {
-			return errors.Wrapf(err, "save")
-		}
-		logger.Tf(ctx, "Save ASR output to %v ok", stage.asrOutputJSON)
 	}
 
 	ohttp.WriteData(ctx, w, r, &struct {
 		SID string         `json:"sid"`
 		ASR *AudioResponse `json:"asr"`
 	}{
-		SID: stage.sid, ASR: stage.asrOutputObject,
+		SID: project.SID, ASR: project.asrOutputObject,
 	})
 	return nil
 }
@@ -622,7 +742,7 @@ func doTTS(ctx context.Context, stage *Project, target *AudioSegment) error {
 	defer resp.Close()
 
 	ttsFilename := fmt.Sprintf("tts-%v.aac", target.UUID)
-	ttsFile := path.Join(stage.mainDir, ttsFilename)
+	ttsFile := path.Join(stage.MainDir, ttsFilename)
 	out, err := os.Create(ttsFile)
 	if err != nil {
 		return errors.Errorf("Unable to create the file %v for writing", ttsFile)
@@ -639,12 +759,63 @@ func doTTS(ctx context.Context, stage *Project, target *AudioSegment) error {
 	return nil
 }
 
+func detectInput(ctx context.Context, stage *Project) (duration float64, bitrate int, err error) {
+	args := []string{
+		"-show_error", "-show_private_data", "-v", "quiet", "-find_stream_info", "-print_format", "json",
+		"-show_format",
+	}
+	args = append(args, "-i", stage.asrInputAudio)
+
+	stdout, err := exec.CommandContext(ctx, "ffprobe", args...).Output()
+	if err != nil {
+		err = errors.Wrapf(err, "probe %v", stage.asrInputAudio)
+		return
+	}
+
+	type VLiveFileFormat struct {
+		Starttime string `json:"start_time"`
+		Duration  string `json:"duration"`
+		Bitrate   string `json:"bit_rate"`
+		Streams   int32  `json:"nb_streams"`
+		Score     int32  `json:"probe_score"`
+		HasVideo  bool   `json:"has_video"`
+		HasAudio  bool   `json:"has_audio"`
+	}
+
+	format := struct {
+		Format VLiveFileFormat `json:"format"`
+	}{}
+	if err = json.Unmarshal([]byte(stdout), &format); err != nil {
+		err = errors.Wrapf(err, "parse format %v", stdout)
+		return
+	}
+
+	var fv float64
+	if fv, err = strconv.ParseFloat(format.Format.Duration, 64); err != nil {
+		err = errors.Wrapf(err, "parse duration %v", format.Format.Duration)
+		return
+	} else {
+		duration = fv
+	}
+
+	var iv int64
+	if iv, err = strconv.ParseInt(format.Format.Bitrate, 10, 64); err != nil {
+		err = errors.Wrapf(err, "parse bitrate %v", format.Format.Bitrate)
+		return
+	} else {
+		bitrate = int(iv)
+	}
+
+	logger.Tf(ctx, "ASR input duration=%v, bitrate=%v", duration, bitrate)
+	return
+}
+
 func detectTTS(ctx context.Context, stage *Project, target *AudioSegment) error {
 	args := []string{
 		"-show_error", "-show_private_data", "-v", "quiet", "-find_stream_info", "-print_format", "json",
 		"-show_format",
 	}
-	args = append(args, "-i", path.Join(stage.mainDir, target.TTS))
+	args = append(args, "-i", path.Join(stage.MainDir, target.TTS))
 
 	stdout, err := exec.CommandContext(ctx, "ffprobe", args...).Output()
 	if err != nil {
@@ -749,7 +920,7 @@ func handleStagePreview(ctx context.Context, w http.ResponseWriter, r *http.Requ
 
 	w.Header().Set("Content-Type", "audio/aac")
 
-	ttsFileServer := http.FileServer(http.Dir(path.Join(stage.mainDir)))
+	ttsFileServer := http.FileServer(http.Dir(path.Join(stage.MainDir)))
 	r.URL.Path = fmt.Sprintf("/%v", target.TTS)
 	ttsFileServer.ServeHTTP(w, r)
 	return nil
@@ -837,8 +1008,8 @@ func handleStageExport(ctx context.Context, w http.ResponseWriter, r *http.Reque
 	}
 	ctx = stage.loggingCtx
 
-	audioFilename := fmt.Sprintf("audio-%v.wav", stage.sid)
-	audioFile := path.Join(stage.mainDir, audioFilename)
+	audioFilename := fmt.Sprintf("audio-%v.wav", stage.SID)
+	audioFile := path.Join(stage.MainDir, audioFilename)
 
 	f, err := os.Create(audioFile)
 	if err != nil {
@@ -884,16 +1055,15 @@ func handleStageExport(ctx context.Context, w http.ResponseWriter, r *http.Reque
 
 		var wavDuration float64
 		if err := func() error {
-			ttsFile := path.Join(stage.mainDir, segment.TTS)
-			wavFile := path.Join(stage.mainDir, fmt.Sprintf("tts-%v.wav", segment.UUID))
+			ttsFile := path.Join(stage.MainDir, segment.TTS)
+			wavFile := path.Join(stage.MainDir, fmt.Sprintf("tts-%v.wav", segment.UUID))
 			logger.Tf(ctx, "Convert tts %v to wav", ttsFile)
 			if true {
-				err := exec.CommandContext(ctx, "ffmpeg",
+				if err := exec.CommandContext(ctx, "ffmpeg",
 					"-i", ttsFile,
 					"-vn", "-c:a", "pcm_s16le", "-ac", "1", "-ar", "100000", "-ab", "300k",
 					"-y", wavFile,
-				).Run()
-				if err != nil {
+				).Run(); err != nil {
 					return errors.Errorf("Error converting the file")
 				}
 			}
@@ -928,16 +1098,14 @@ func handleStageExport(ctx context.Context, w http.ResponseWriter, r *http.Reque
 	enc.Close()
 	logger.Tf(ctx, "All segments are converted")
 
-	aacFilename := fmt.Sprintf("audio-%v.mp4", stage.sid)
-	aacFile := path.Join(stage.mainDir, aacFilename)
+	aacFilename := fmt.Sprintf("audio-%v.mp4", stage.SID)
+	aacFile := path.Join(stage.MainDir, aacFilename)
 	if true {
-		err := exec.CommandContext(ctx, "ffmpeg",
+		if err := exec.CommandContext(ctx, "ffmpeg",
 			"-i", audioFile,
 			"-vn", "-c:a", "aac", "-ac", "2", "-ar", "44100", "-ab", "120k",
 			"-y", aacFile,
-		).Run()
-
-		if err != nil {
+		).Run(); err != nil {
 			return errors.Errorf("Error converting the file")
 		}
 		logger.Tf(ctx, "Convert to aac %v ok", aacFile)
@@ -972,6 +1140,13 @@ func doMain(ctx context.Context) error {
 
 	http.HandleFunc("/api/vod-translator/create/", func(w http.ResponseWriter, r *http.Request) {
 		if err := handleStageCreate(ctx, w, r); err != nil {
+			logger.Tf(ctx, "error: %+v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
+	http.HandleFunc("/api/vod-translator/load/", func(w http.ResponseWriter, r *http.Request) {
+		if err := handleStageLoad(ctx, w, r); err != nil {
 			logger.Tf(ctx, "error: %+v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}

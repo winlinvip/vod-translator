@@ -51,6 +51,7 @@ function Project() {
   const navigate = useNavigate();
   const [loading, setLoading] = React.useState(true);
   const [sid, setSid] = React.useState(null);
+  const [inputURL, setInputURL] = React.useState(null);
 
   React.useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -58,21 +59,48 @@ function Project() {
       navigate('/create');
     } else {
       setSid(params.get('sid'));
-      setLoading(false);
     }
-  }, [location, navigate, setLoading, setSid]);
+  }, [location, navigate, setSid]);
+
+  React.useEffect(() => {
+    if (!sid) return;
+
+    axios.post("/api/vod-translator/load/", {
+      sid,
+    }).then(res => {
+      const url = res.data.data.url;
+      if (url) setInputURL(url);
+      setLoading(false);
+    });
+  }, [sid, setLoading, setInputURL]);
 
   if (loading || !sid) {
     return <>Loading...</>;
   }
-  return <Editor sid={sid} />;
+  return <Editor sid={sid} defaultInputURL={inputURL} />;
 }
 
-function Editor({sid}) {
+function Editor({sid, defaultInputURL}) {
   const player = React.useRef(null);
   const ttsPlayer = React.useRef(null);
-  const [inputUrl, setInputUrl] = React.useState('/api/vod-translator/resources/ai-talk.mp4');
+  const [inputUrl, setInputUrl] = React.useState(defaultInputURL || '/api/vod-translator/resources/ai-talk.mp4');
   const [asr, setAsr] = React.useState(null);
+  // Automatically or user selected segment.
+  const previousSelectedSegment = React.useRef(null);
+
+  const formatDuration = React.useCallback((duration) => {
+    let hours = Math.floor(duration / 3600);
+    let minutes = Math.floor((duration - (hours * 3600)) / 60);
+    let seconds = duration - (hours * 3600) - (minutes * 60);
+    let milliseconds = Math.round((seconds % 1) * 1000);
+
+    hours = hours < 10 ? "0"+hours : parseInt(hours);
+    minutes = minutes < 10 ? "0"+minutes : parseInt(minutes);
+    seconds = seconds < 10 ? "0"+parseInt(seconds) : parseInt(seconds);
+    milliseconds = milliseconds < 100 ? (milliseconds < 10 ? "00"+parseInt(milliseconds) : "0" + parseInt(milliseconds)) : parseInt(milliseconds);
+
+    return hours+':'+minutes+':'+seconds+'.'+milliseconds;
+  }, []);
 
   const loadVideo = React.useCallback(() => {
     axios.post("/api/vod-translator/asr/", {
@@ -311,6 +339,35 @@ function Editor({sid}) {
     });
   }, []);
 
+  // Auto select segment if player is playing.
+  React.useEffect(() => {
+    const timer = setInterval(() => {
+      if (!player?.current?.currentTime) return;
+      if (!asr?.segments) return;
+
+      let segment = asr?.segments?.find(s => s.start <= player.current.currentTime && player.current.currentTime <= s.end);
+      if (!segment) return;
+      if (previousSelectedSegment.current === segment) return;
+      if (asr.segments.indexOf(segment) && player.current.currentTime <= 0) return;
+
+      const tr = document.querySelector(`tr:nth-child(${asr.segments.indexOf(segment) + 1})`);
+      const previousTr = document.querySelector(`tr:nth-child(${asr.segments.indexOf(previousSelectedSegment.current) + 1})`);
+      let scroolToTr = document.querySelector(`tr:nth-child(${asr.segments.indexOf(segment) - 3})`);
+      if (asr.segments.indexOf(segment) <= 0) scroolToTr = tr;
+      if (!player.current.paused && scroolToTr) scroolToTr.scrollIntoView({behavior: 'smooth'});
+      if (previousSelectedSegment.current && previousTr) {
+        previousTr.style.backgroundColor = '';
+      }
+      if (tr) {
+        tr.style.backgroundColor = 'yellow';
+        previousSelectedSegment.current = segment;
+      }
+
+      console.log(`Player time ${player.current.currentTime}, segment is ${segment?.id}, ${segment?.start} ~ ${segment?.end}`);
+    }, 600);
+    return () => clearInterval(timer);
+  }, [asr, player]);
+
   return (
     <div style={{padding: '10px'}}>
       <p>
@@ -330,17 +387,6 @@ function Editor({sid}) {
         <button onClick={(e) => exportAudio()}>导出</button> &nbsp;
       </p> : ''}
       {asr ? <table>
-        <thead>
-        <tr>
-          <th>ID</th>
-          <th>UUID</th>
-          <th>Start ~ End</th>
-          <th>Duration</th>
-          <th>TTSD</th>
-          <th>Text</th>
-          <th>Actions</th>
-        </tr>
-        </thead>
         <tbody>
         {asr?.segments?.map((s, index) => {
           return (
@@ -351,7 +397,7 @@ function Editor({sid}) {
             }}>
               <td>{index}</td>
               <td onClick={(e) => playSegemnt(e, s)}>{s.uuid.substr(0, 8)}</td>
-              <td>{Number(s.start).toFixed(1)} ~ {Number(s.end).toFixed(1)}</td>
+              <td>{formatDuration(s.start)} ~ {formatDuration(s.end)}</td>
               <td>{Number(s.end - s.start).toFixed(1)}</td>
               <td onClick={(e) => previewTTS(e, s)}>{Number(s.tts_duration).toFixed(1)}</td>
               {s.editing ?
@@ -359,7 +405,7 @@ function Editor({sid}) {
                   <input defaultValue={s.text} style={{width: '500px'}} onChange={(e) => saveText(e, s)}></input> <br/>
                   <input defaultValue={s.translated} style={{width: '500px'}} onChange={(e) => saveTranslated(e, s)}></input>
                 </td> :
-                <td onClick={(e) => playSegemnt(e, s)}>
+                <td style={{width: '40%'}} onClick={(e) => playSegemnt(e, s)}>
                   {s.text} <br/>
                   {s.translated}
                 </td>}
