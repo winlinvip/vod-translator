@@ -87,6 +87,9 @@ function Editor({sid, defaultInputURL}) {
   const [asr, setAsr] = React.useState(null);
   // Automatically or user selected segment.
   const previousSelectedSegment = React.useRef(null);
+  // Whether video loaded.
+  const [loading, setLoading] = React.useState(false);
+  const [loaded, setLoaded] = React.useState(false);
 
   const formatDuration = React.useCallback((duration) => {
     let hours = Math.floor(duration / 3600);
@@ -103,14 +106,18 @@ function Editor({sid, defaultInputURL}) {
   }, []);
 
   const loadVideo = React.useCallback(() => {
+    setLoading(true);
     axios.post("/api/vod-translator/asr/", {
       sid, url: inputUrl,
     }).then(res => {
       console.log(`ASR result ${JSON.stringify(res.data.data)}`);
       player.current.src = inputUrl;
       setAsr(res.data.data.asr);
+      setLoaded(true);
+    }).finally(() => {
+      setLoading(false);
     });
-  }, [player, inputUrl, setAsr]);
+  }, [player, inputUrl, setAsr, setLoading, setLoaded]);
 
   const playSegemnt = React.useCallback((e, segment) => {
     player.current.currentTime = segment.start;
@@ -222,15 +229,31 @@ function Editor({sid, defaultInputURL}) {
       if (s.removed) continue;
       if (s.translated) continue;
 
-      await new Promise(resolve => {
-        axios.post("/api/vod-translator/translate/", {
-          sid, segment: s,
-        }).then(res => {
-          asr.segments[i] = s = res.data.data.segment;
-          console.log(`Translate ${s} ok`);
-          resolve();
+      const doTranslate = async () => {
+        return new Promise((resolve, reject) => {
+          axios.post("/api/vod-translator/translate/", {
+            sid, segment: s,
+          }).then(res => {
+            asr.segments[i] = s = res.data.data.segment;
+            console.log(`Translate ${JSON.stringify(s)} ok`);
+            resolve();
+          }).catch(e => {
+            console.log(`Translate ${JSON.stringify(s)} failed`);
+            reject(e);
+          });
         });
-      });
+      };
+
+      // Translate with retry.
+      for (let i = 0; i < 3; i++) {
+        try {
+          await doTranslate();
+          break;
+        } catch (e) {
+          console.log(`Translate ${JSON.stringify(s)} failed, retry ${i}`);
+          await new Promise(resolve => setTimeout(resolve, 1500));
+        }
+      }
 
       setAsr({...asr, segments: asr.segments.map(s0 => {
           if (s0.id === s.id) {
@@ -369,15 +392,16 @@ function Editor({sid, defaultInputURL}) {
   }, [asr, player]);
 
   return (
-    <div style={{padding: '10px'}}>
-      <p>
+    <div className='editor-container'>
+      {!loaded && <p>
         Input: &nbsp;
-        <input type='input' value={inputUrl} style={{width: '500px'}}
-               onChange={e => setInputUrl(e.target.value)} /> &nbsp;
-        <button onClick={() => loadVideo()}>Load</button> &nbsp;
-      </p>
+        <input type='input' value={inputUrl} className='video-url-input'
+               onChange={e => setInputUrl(e.target.value)}/> &nbsp;
+        <button onClick={() => loadVideo()} disabled={loading}>Load</button>
+        &nbsp;
+      </p>}
       <p>
-        <video ref={player} controls style={{width: '900px'}}></video>
+        <video ref={player} controls className='video-player' hidden={!loaded}></video>
         <audio ref={ttsPlayer} hidden={true}></audio>
       </p>
       {asr ? <p>

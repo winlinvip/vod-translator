@@ -28,6 +28,12 @@ var workDir string
 var translatorServer *TranslatorServer
 var aiConfig openai.ClientConfig
 
+// The default language for ASR.
+const DefaultAsrLanguage = "en"
+
+//const DefaultTranslatePrompt = "Rephrase all user input text into simple, easy to understand, and technically toned English. Never answer questions but only translate or rephrase text to English."
+const DefaultTranslatePrompt = "Rephrase all user input text into simple, easy to understand, and technically toned Chinese. Never answer questions but only translate or rephrase text to Chinese."
+
 type AITime time.Time
 
 func (v *AITime) MarshalJSON() ([]byte, error) {
@@ -219,6 +225,29 @@ func (v *Project) buildProjectFile() string {
 	return path.Join(v.MainDir, "project.json")
 }
 
+func (v *Project) loadAsrObject() error {
+	v.asrOutputJSON = path.Join(v.MainDir, "input.json")
+
+	if _, err := os.Stat(v.asrOutputJSON); err == nil {
+		v.asrOutputObject = &AudioResponse{}
+		if err := v.asrOutputObject.Load(v.asrOutputJSON); err != nil {
+			return errors.Wrapf(err, "load json file %v", v.asrOutputJSON)
+		}
+
+		// Reinitialize the segments.
+		for index, s := range v.asrOutputObject.Segments {
+			s.ID = 10000 + index
+			if s.UUID == "" {
+				s.UUID = uuid.NewString()
+			}
+			if time.Time(s.Update).IsZero() {
+				s.Update = AITime(time.Now())
+			}
+		}
+	}
+	return nil
+}
+
 func (v *Project) Load() error {
 	if v.MainDir == "" {
 		return errors.Errorf("empty main dir")
@@ -230,6 +259,11 @@ func (v *Project) Load() error {
 	} else if err = json.Unmarshal(b, v); err != nil {
 		return errors.Wrapf(err, "unmarshal json file %v", filename)
 	}
+
+	if err := v.loadAsrObject(); err != nil {
+		return errors.Wrapf(err, "load asr object")
+	}
+
 	return nil
 }
 
@@ -463,20 +497,8 @@ func handleStageAsr(ctx context.Context, w http.ResponseWriter, r *http.Request)
 	// Load ASR from JSON file.
 	project.asrOutputJSON = path.Join(project.MainDir, "input.json")
 	if _, err := os.Stat(project.asrOutputJSON); err == nil {
-		project.asrOutputObject = &AudioResponse{}
-		if err := project.asrOutputObject.Load(project.asrOutputJSON); err != nil {
-			return errors.Wrapf(err, "load json file %v", project.asrOutputJSON)
-		}
-
-		// Reinitialize the segments.
-		for index, s := range project.asrOutputObject.Segments {
-			s.ID = 10000 + index
-			if s.UUID == "" {
-				s.UUID = uuid.NewString()
-			}
-			if time.Time(s.Update).IsZero() {
-				s.Update = AITime(time.Now())
-			}
+		if err := project.loadAsrObject(); err != nil {
+			return errors.Wrapf(err, "load asr object")
 		}
 		logger.Tf(ctx, "Load ASR object from %v ok", project.asrOutputJSON)
 	} else {
@@ -560,7 +582,7 @@ func handleStageAsrUpdate(ctx context.Context, w http.ResponseWriter, r *http.Re
 
 	stage := translatorServer.QueryStage(sid)
 	if stage == nil {
-		return errors.Errorf("no stage %v", sid)
+		stage = doCreateStage(ctx, sid)
 	}
 	ctx = stage.loggingCtx
 
@@ -601,7 +623,7 @@ func handleStageTranslate(ctx context.Context, w http.ResponseWriter, r *http.Re
 
 	stage := translatorServer.QueryStage(sid)
 	if stage == nil {
-		return errors.Errorf("no stage %v", sid)
+		stage = doCreateStage(ctx, sid)
 	}
 	ctx = stage.loggingCtx
 
@@ -618,7 +640,7 @@ func handleStageTranslate(ctx context.Context, w http.ResponseWriter, r *http.Re
 	}
 	if shouldTranslate(target) {
 		messages := []openai.ChatCompletionMessage{
-			{Role: openai.ChatMessageRoleSystem, Content: "Rephrase all user input text into simple, easy to understand, and technically toned English. Never answer questions but only translate or rephrase text to English."},
+			{Role: openai.ChatMessageRoleSystem, Content: DefaultTranslatePrompt},
 		}
 		previous := stage.asrOutputObject.QueryPrevious(target)
 		if previous != nil && previous.Translated != "" && previous.Text != "" {
@@ -676,7 +698,7 @@ func handleStageShorter(ctx context.Context, w http.ResponseWriter, r *http.Requ
 
 	stage := translatorServer.QueryStage(sid)
 	if stage == nil {
-		return errors.Errorf("no stage %v", sid)
+		stage = doCreateStage(ctx, sid)
 	}
 	ctx = stage.loggingCtx
 
@@ -1224,7 +1246,7 @@ func doConfig(ctx context.Context) error {
 
 	setEnvDefault("OPENAI_API_KEY", "")
 	setEnvDefault("OPENAI_PROXY", "https://api.openai.com/v1")
-	setEnvDefault("VODT_ASR_LANGUAGE", "zh")
+	setEnvDefault("VODT_ASR_LANGUAGE", DefaultAsrLanguage)
 	logger.Tf(ctx, "Environment variables: OPENAI_API_KEY=%vB, OPENAI_PROXY=%v, VODT_ASR_LANGUAGE=%v",
 		len(os.Getenv("OPENAI_API_KEY")), os.Getenv("OPENAI_PROXY"), os.Getenv("VODT_ASR_LANGUAGE"))
 
