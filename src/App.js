@@ -84,6 +84,7 @@ function Editor({sid, defaultInputURL}) {
   const player = React.useRef(null);
   const ttsPlayer = React.useRef(null);
   const [inputUrl, setInputUrl] = React.useState(defaultInputURL || '/api/vod-translator/resources/ai-talk.mp4');
+  const [isAudio, setIsAudio] = React.useState(false);
   const [asr, setAsr] = React.useState(null);
   // Automatically or user selected segment.
   const previousSelectedSegment = React.useRef(null);
@@ -391,17 +392,29 @@ function Editor({sid, defaultInputURL}) {
     return () => clearInterval(timer);
   }, [asr, player]);
 
+  // Whether input is audio only source.
+  React.useEffect(() => {
+    if (!inputUrl) return;
+    const audioExtensions = ['.m4a', '.mp3', '.wav', '.aac'];
+    if (audioExtensions.some(ext => inputUrl.includes(ext))) {
+      setIsAudio(true);
+    } else {
+      setIsAudio(false);
+    }
+  }, [inputUrl, setIsAudio]);
+
   return (
     <div className='editor-container'>
       {!loaded && <p>
         Input: &nbsp;
-        <input type='input' value={inputUrl} className='video-url-input'
+        <input type='input' defaultValue={inputUrl} className='video-url-input'
                onChange={e => setInputUrl(e.target.value)}/> &nbsp;
         <button onClick={() => loadVideo()} disabled={loading}>Load</button>
         &nbsp;
       </p>}
       <p>
-        <video ref={player} controls className='video-player' hidden={!loaded}></video>
+        {isAudio ? <audio ref={player} controls className='video-player' hidden={!loaded}></audio> : ''}
+        {!isAudio ? <video ref={player} controls className='video-player' hidden={!loaded}></video> : ''}
         <audio ref={ttsPlayer} hidden={true}></audio>
       </p>
       {asr ? <p>
@@ -419,7 +432,7 @@ function Editor({sid, defaultInputURL}) {
               textDecorationStyle: 'double',
               backgroundColor: !s.removed && s.tts_duration && s.tts_duration > (s.end - s.start) ? 'red':'',
             }}>
-              <td>{index}</td>
+              <td>{s.id}</td>
               <td onClick={(e) => playSegemnt(e, s)}>{s.uuid.substr(0, 8)}</td>
               <td>{formatDuration(s.start)} ~ {formatDuration(s.end)}</td>
               <td>{Number(s.end - s.start).toFixed(1)}</td>
