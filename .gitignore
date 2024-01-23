@@ -33,4 +33,4 @@ server.crt
 *.mp4
 /backend/server
 project-*
-
+projects

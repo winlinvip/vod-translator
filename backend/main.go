@@ -369,7 +369,7 @@ func doCreateStage(ctx context.Context, sid string) *Project {
 	project := NewProject(func(project *Project) {
 		project.loggingCtx = ctx
 		project.SID = sid
-		project.MainDir = path.Join(workDir, fmt.Sprintf("project-%v", sid))
+		project.MainDir = path.Join(workDir, "projects", fmt.Sprintf("project-%v", sid))
 	})
 
 	// If stage exists, load it.
