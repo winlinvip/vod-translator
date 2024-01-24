@@ -1,70 +1,45 @@
-# Getting Started with Create React App
+# VoD Translator
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+VoD Translator uses GPT to translate speech in video to other languages.
 
-## Available Scripts
+!!! Warning: We will integrate this project to [SRS Stack](https://github.com/ossrs/srs-stack), to make it more easy to use.
 
-In the project directory, you can run:
+## Usage
 
-### `npm start`
+Setup a `.env` file with the following variables:
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+```
+OPENAI_API_KEY=xxx
+OPENAI_PROXY=https://api.openai.com/v1
+VODT_ASR_LANGUAGE=en
+```
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+Then start the backend:
 
-### `npm test`
+```bash
+cd backend && go run .
+```
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+Next, start the frontend:
 
-### `npm run build`
+```bash
+npm install
+npm run start
+```
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+Finally, open http://localhost:3000/ in your browser.
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+## Translate a VoD File
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+First, Put the file like `ai-talk.mp4` in the `backend/static` folder.
 
-### `npm run eject`
+```bash
+cp /path/your-file.mp4 backend/static/ai-talk.mp4
+```
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+Second, click the button `Create` to create a project.
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+Next, input the url `/api/vod-translator/resources/ai-talk.mp4` in the input box.
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+Finally, click the button `Load` to load the file.
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
-
-## Learn More
-
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
-
-### Code Splitting
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
-
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
