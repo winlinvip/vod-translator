@@ -52,7 +52,14 @@
 table {
   display: block;
   overflow-y: auto;
+}
+
+.table-video {
   height: 500px;
+}
+
+.table-audio {
+  height: 800px;
 }
 
 thead {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -28,11 +29,9 @@ var workDir string
 var translatorServer *TranslatorServer
 var aiConfig openai.ClientConfig
 
-// The default language for ASR.
 const DefaultAsrLanguage = "en"
-
-//const DefaultTranslatePrompt = "Rephrase all user input text into simple, easy to understand, and technically toned English. Never answer questions but only translate or rephrase text to English."
 const DefaultTranslatePrompt = "Rephrase all user input text into simple, easy to understand, and technically toned Chinese. Never answer questions but only translate or rephrase text to Chinese."
+const DefaultShorterPrompt = "Make the text shorter for speaking. Use shorter spoken words instead. Use as less words as possible. Please maintain the original meaning."
 
 type AITime time.Time
 
@@ -640,7 +639,7 @@ func handleStageTranslate(ctx context.Context, w http.ResponseWriter, r *http.Re
 	}
 	if shouldTranslate(target) {
 		messages := []openai.ChatCompletionMessage{
-			{Role: openai.ChatMessageRoleSystem, Content: DefaultTranslatePrompt},
+			{Role: openai.ChatMessageRoleSystem, Content: os.Getenv("VODT_CHAT_PROMPT")},
 		}
 		previous := stage.asrOutputObject.QueryPrevious(target)
 		if previous != nil && previous.Translated != "" && previous.Text != "" {
@@ -657,7 +656,7 @@ func handleStageTranslate(ctx context.Context, w http.ResponseWriter, r *http.Re
 
 		client := openai.NewClientWithConfig(aiConfig)
 		resp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-			Model:    openai.GPT3Dot5Turbo1106,
+			Model:    os.Getenv("VODT_CHAT_MODEL"),
 			Messages: messages,
 		})
 		if err != nil {
@@ -709,7 +708,7 @@ func handleStageShorter(ctx context.Context, w http.ResponseWriter, r *http.Requ
 
 	if true {
 		messages := []openai.ChatCompletionMessage{
-			{Role: openai.ChatMessageRoleSystem, Content: "Make the text shorter. Please maintain the original meaning."},
+			{Role: openai.ChatMessageRoleSystem, Content: os.Getenv("VODT_SHORTER_PROMPT")},
 		}
 		if previous := stage.asrOutputObject.QueryPrevious(target); previous != nil && previous.Translated != "" {
 			messages = append(messages, []openai.ChatCompletionMessage{
@@ -723,7 +722,7 @@ func handleStageShorter(ctx context.Context, w http.ResponseWriter, r *http.Requ
 
 		client := openai.NewClientWithConfig(aiConfig)
 		resp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-			Model:    openai.GPT4TurboPreview,
+			Model:    os.Getenv("VODT_SHORTER_MODEL"),
 			Messages: messages,
 		})
 		if err != nil {
@@ -751,34 +750,80 @@ func handleStageShorter(ctx context.Context, w http.ResponseWriter, r *http.Requ
 }
 
 func doTTS(ctx context.Context, stage *Project, target *AudioSegment) error {
-	client := openai.NewClientWithConfig(aiConfig)
-	resp, err := client.CreateSpeech(ctx, openai.CreateSpeechRequest{
-		Model:          openai.TTSModel1,
-		Input:          target.Translated,
-		Voice:          openai.VoiceNova,
-		ResponseFormat: openai.SpeechResponseFormatAac,
-	})
-	if err != nil {
-		return errors.Wrapf(err, "create speech")
-	}
-	defer resp.Close()
+	if os.Getenv("VODT_TTS_PROVIDER") == "openai" {
+		client := openai.NewClientWithConfig(aiConfig)
+		resp, err := client.CreateSpeech(ctx, openai.CreateSpeechRequest{
+			Model:          openai.TTSModel1,
+			Input:          target.Translated,
+			Voice:          openai.VoiceNova,
+			ResponseFormat: openai.SpeechResponseFormatAac,
+		})
+		if err != nil {
+			return errors.Wrapf(err, "create speech")
+		}
+		defer resp.Close()
 
-	ttsFilename := fmt.Sprintf("tts-%v.aac", target.UUID)
-	ttsFile := path.Join(stage.MainDir, ttsFilename)
-	out, err := os.Create(ttsFile)
-	if err != nil {
-		return errors.Errorf("Unable to create the file %v for writing", ttsFile)
-	}
-	defer out.Close()
+		ttsFilename := fmt.Sprintf("tts-%v.aac", target.UUID)
+		ttsFile := path.Join(stage.MainDir, ttsFilename)
+		out, err := os.Create(ttsFile)
+		if err != nil {
+			return errors.Errorf("Unable to create the file %v for writing", ttsFile)
+		}
+		defer out.Close()
 
-	if _, err = io.Copy(out, resp); err != nil {
-		return errors.Errorf("Error writing the file")
-	}
+		if _, err = io.Copy(out, resp); err != nil {
+			return errors.Errorf("Error writing the file")
+		}
 
-	target.TTS = ttsFilename
-	target.TTSAt = AITime(time.Now())
-	logger.Tf(ctx, "TTS ok")
-	return nil
+		target.TTS = ttsFilename
+		target.TTSAt = AITime(time.Now())
+		logger.Tf(ctx, "TTS ok")
+		return nil
+	} else if os.Getenv("VODT_TTS_PROVIDER") == "11labs" {
+		url := fmt.Sprintf("https://api.elevenlabs.io/v1/text-to-speech/%v", os.Getenv("VODT_11LABS_VOICE"))
+
+		data := map[string]string{
+			"text": target.Translated,
+		}
+		b, err := json.Marshal(data)
+		if err != nil {
+			return errors.Errorf("Unable to marshal the data")
+		}
+
+		req, err := http.NewRequest("POST", url, bytes.NewReader(b))
+		if err != nil {
+			return errors.Errorf("Unable to create the request")
+		}
+
+		req.Header.Set("Accept", "audio/mpeg")
+		req.Header.Add("xi-api-key", os.Getenv("VODT_11LABS_KEY"))
+		req.Header.Add("Content-Type", "application/json")
+
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return errors.Errorf("Unable to send the request")
+		}
+		defer res.Body.Close()
+
+		ttsFilename := fmt.Sprintf("tts-%v.mp3", target.UUID)
+		ttsFile := path.Join(stage.MainDir, ttsFilename)
+		out, err := os.Create(ttsFile)
+		if err != nil {
+			return errors.Errorf("Unable to create the file %v for writing", ttsFile)
+		}
+		defer out.Close()
+
+		if _, err = io.Copy(out, res.Body); err != nil {
+			return errors.Errorf("Error writing the file")
+		}
+
+		target.TTS = ttsFilename
+		target.TTSAt = AITime(time.Now())
+		logger.Tf(ctx, "TTS ok")
+		return nil
+	} else {
+		return errors.Errorf("Unknown TTS provider %v", os.Getenv("VODT_TTS_PROVIDER"))
+	}
 }
 
 func detectInput(ctx context.Context, stage *Project) (duration float64, bitrate int, err error) {
@@ -1247,8 +1292,21 @@ func doConfig(ctx context.Context) error {
 	setEnvDefault("OPENAI_API_KEY", "")
 	setEnvDefault("OPENAI_PROXY", "https://api.openai.com/v1")
 	setEnvDefault("VODT_ASR_LANGUAGE", DefaultAsrLanguage)
-	logger.Tf(ctx, "Environment variables: OPENAI_API_KEY=%vB, OPENAI_PROXY=%v, VODT_ASR_LANGUAGE=%v",
-		len(os.Getenv("OPENAI_API_KEY")), os.Getenv("OPENAI_PROXY"), os.Getenv("VODT_ASR_LANGUAGE"))
+	setEnvDefault("VODT_CHAT_PROMPT", DefaultTranslatePrompt)
+	setEnvDefault("VODT_CHAT_MODEL", openai.GPT3Dot5Turbo1106)
+	setEnvDefault("VODT_SHORTER_MODEL", openai.GPT4TurboPreview)
+	setEnvDefault("VODT_SHORTER_PROMPT", DefaultShorterPrompt)
+	setEnvDefault("VODT_TTS_PROVIDER", "openai")
+	setEnvDefault("VODT_11LABS_KEY", "")
+	setEnvDefault("VODT_11LABS_VOICE", "")
+	logger.Tf(ctx, "Environment variables: OPENAI_API_KEY=%vB, OPENAI_PROXY=%v, VODT_ASR_LANGUAGE=%v, VODT_CHAT_PROMPT=%v, "+
+		"VODT_CHAT_MODEL=%v, VODT_SHORTER_MODEL=%v, VODT_11LABS_KEY=%vB, VODT_TTS_PROVIDER=%v, VODT_SHORTER_PROMPT=%v, "+
+		"VODT_11LABS_VOICE=%v",
+		len(os.Getenv("OPENAI_API_KEY")), os.Getenv("OPENAI_PROXY"), os.Getenv("VODT_ASR_LANGUAGE"),
+		os.Getenv("VODT_CHAT_PROMPT"), os.Getenv("VODT_CHAT_MODEL"), os.Getenv("VODT_SHORTER_MODEL"),
+		len(os.Getenv("VODT_11LABS_KEY")), os.Getenv("VODT_TTS_PROVIDER"), os.Getenv("VODT_SHORTER_PROMPT"),
+		os.Getenv("VODT_11LABS_VOICE"),
+	)
 
 	// Load env variables from file.
 	if _, err := os.Stat("../.env"); err == nil {
@@ -1258,6 +1316,14 @@ func doConfig(ctx context.Context) error {
 	}
 	if os.Getenv("OPENAI_API_KEY") == "" {
 		return errors.New("OPENAI_API_KEY is required")
+	}
+	if os.Getenv("VODT_TTS_PROVIDER") == "11labs" {
+		if os.Getenv("VODT_11LABS_KEY") == "" {
+			return errors.New("VODT_11LABS_KEY is required")
+		}
+		if os.Getenv("VODT_11LABS_VOICE") == "" {
+			return errors.New("VODT_11LABS_VOICE is required")
+		}
 	}
 
 	// Initialize OpenAI client config.

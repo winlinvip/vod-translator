@@ -423,7 +423,7 @@ function Editor({sid, defaultInputURL}) {
         <button onClick={(e) => ttsAll()}>TTS全部</button> &nbsp;
         <button onClick={(e) => exportAudio()}>导出</button> &nbsp;
       </p> : ''}
-      {asr ? <table>
+      {asr ? <table className={isAudio ? 'table-audio' : 'table-video'}>
         <tbody>
         {asr?.segments?.map((s, index) => {
           return (
