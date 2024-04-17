@@ -1,8 +1,8 @@
 # VoD Translator
 
-VoD Translator uses GPT to translate speech in video to other languages.
+!!! Warning: We have integrated this project to [Oryx(SRS Stack)](https://github.com/ossrs/oryx), see [Revolutionize Video Content with Oryx: Effortless Dubbing and Translating to Multiple Languages Using OpenAI](https://blog.ossrs.io/expand-your-global-reach-with-srs-stack-effortless-video-translation-and-dubbing-solutions-544e1db671c2), to make it more easy to use.
 
-!!! Warning: We will integrate this project to [SRS Stack](https://github.com/ossrs/srs-stack), to make it more easy to use.
+VoD Translator uses GPT to translate speech in video to other languages.
 
 ## Usage
 
